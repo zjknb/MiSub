@@ -521,7 +521,7 @@ MiSub 提供 `/cron` 接口用于外部定时服务触发订阅刷新，适合 C
 
 ## 🤝 贡献
 
-欢迎提交 Issue 和 Pull Request
+欢迎提交 Issue 和 Pull Request!
 
 ---
 
