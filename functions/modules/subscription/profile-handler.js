@@ -104,8 +104,24 @@ export async function handleProfileMode(
     profileId,
     userAgent,
     applyTransform = false,
-    skipCertVerify = false
+    skipCertVerify = false,
+    depth = 0,
+    visited = new Set()
 ) {
+    if (depth > 3 || (profileId && visited.has(profileId))) {
+        console.warn(
+            `[Profile Nesting] 触发深度超限或循环引用保护: profileId=${profileId}, depth=${depth}`
+        );
+        return {
+            success: false,
+            subscriptions: [],
+            nodes: [],
+            totalCount: 0,
+            stats: { protocols: {}, regions: {} },
+            error: '循环引用或嵌套层级过深',
+        };
+    }
+
     const storageAdapter = StorageFactory.createAdapter(
         env,
         await StorageFactory.getStorageType(env)
@@ -136,37 +152,38 @@ export async function handleProfileMode(
     const misubMap = new Map(relatedSubs.map((item) => [item.id, item]));
 
     const targetMisubs = [];
+    const profileSubIds = (profile.subscriptions || []).map((item) =>
+        typeof item === 'object' ? item.id : item
+    );
+    profileSubIds.forEach((id) => {
+        const sub = misubMap.get(id);
+        if (sub && sub.enabled && /^https?:\/\//i.test(sub.url)) {
+            targetMisubs.push(sub);
+        }
+    });
 
-    // 1. Add subscriptions in order defined by profile
-    const profileSubIds = profile.subscriptions || [];
-    if (Array.isArray(profileSubIds)) {
-        profileSubIds.forEach((id) => {
-            const sub = misubMap.get(id);
-            if (sub && sub.enabled && sub.url.startsWith('http')) {
-                targetMisubs.push(sub);
-            }
-        });
-    }
-
-    // 2. Add manual nodes in order defined by profile
+    const targetManualNodes = [];
     const profileNodeIds = profile.manualNodes || [];
     if (Array.isArray(profileNodeIds)) {
         profileNodeIds.forEach((id) => {
             const node = misubMap.get(id);
-            if (node && node.enabled && !node.url.startsWith('http')) {
-                targetMisubs.push(node);
-            }
+            if (node && node.enabled) targetManualNodes.push(node);
         });
     }
 
-    // 分离HTTP订阅和手工节点
-    const targetSubscriptions = targetMisubs.filter((item) => item.url.startsWith('http'));
-    const targetManualNodes = targetMisubs.filter((item) => !item.url.startsWith('http'));
-
-    // 处理手工节点（直接解析节点URL）
-    // 先将用户自定义名称写入 URL（与订阅生成流程保持一致），
-    // 确保 parseNodeInfo 和节点转换管道能基于正确名称工作
-    const manualNodeResults = targetManualNodes.map((node) => {
+    const httpProxyPattern = /^https?:\/\/[^/?#]+:\d+(?:[/?#]|$)/i;
+    const targetSubscriptions = targetMisubs.filter((sub) => !httpProxyPattern.test(sub.url));
+    const httpProxyNodes = targetMisubs.filter((sub) => httpProxyPattern.test(sub.url));
+    const seenManualIds = new Set();
+    const allManualNodes = [];
+    for (const node of [...httpProxyNodes, ...targetManualNodes]) {
+        const key = node?.id || node?.url;
+        if (!node || (key && seenManualIds.has(key))) continue;
+        if (key) seenManualIds.add(key);
+        allManualNodes.push(node);
+    }
+    // 处理手工节点（直接解析节点URL），并将用户自定义名称写入 URL。
+    const manualNodeResults = allManualNodes.map((node) => {
         const customName = typeof node.name === 'string' ? node.name.trim() : '';
         const effectiveUrl = customName ? applyManualNodeName(node.url, customName) : node.url;
 
@@ -189,7 +206,7 @@ export async function handleProfileMode(
         };
     });
 
-    // 并行获取HTTP订阅节点
+    // 并行获取HTTP订阅节点（开启保护性缓存时，上游失败回退缓存节点，与输出链路一致）
     const subscriptionResults = await Promise.all(
         targetSubscriptions.map((sub) =>
             fetchSubscriptionNodes(
@@ -202,13 +219,60 @@ export async function handleProfileMode(
                 sub.fetchProxy,
                 skipCertVerify,
                 Boolean(sub?.plusAsSpace),
-                sub?.enableNodeCache === true
+                sub?.enableNodeCache === true,
+                storageAdapter,
+                sub
             )
         )
     );
 
+    // 3. 处理嵌套的组合订阅 (Sub-Profiles)
+    const profileSubProfileIds = profile.subProfiles || [];
+    const nestedSubProfileResults = [];
+    if (Array.isArray(profileSubProfileIds) && profileSubProfileIds.length > 0 && depth < 3) {
+        const nextVisited = new Set(visited);
+        if (profile.id) nextVisited.add(profile.id);
+        if (profile.customId) nextVisited.add(profile.customId);
+
+        for (const subProfileId of profileSubProfileIds) {
+            if (!subProfileId || nextVisited.has(subProfileId)) {
+                console.warn(`[Profile Nesting] 跳过循环引用或空子订阅组: ${subProfileId}`);
+                continue;
+            }
+            try {
+                const subResult = await handleProfileMode(
+                    request,
+                    env,
+                    subProfileId,
+                    userAgent,
+                    true, // 应用子订阅自身的算子与清洗规则
+                    skipCertVerify,
+                    depth + 1,
+                    nextVisited
+                );
+                if (subResult.success && Array.isArray(subResult.nodes)) {
+                    nestedSubProfileResults.push({
+                        subscriptionName: subResult.profileName || '组合订阅',
+                        group: subResult.profileName || '组合订阅',
+                        url: `profile://${subProfileId}`,
+                        success: true,
+                        nodes: subResult.nodes,
+                        error: null,
+                        isSubProfile: true,
+                    });
+                }
+            } catch (err) {
+                console.error(`[Profile Nesting] 拉取子订阅组异常 ${subProfileId}:`, err);
+            }
+        }
+    }
+
     // 合并所有结果
-    const allResults = [...subscriptionResults, ...manualNodeResults];
+    const allResults = [
+        ...subscriptionResults,
+        ...manualNodeResults,
+        ...nestedSubProfileResults,
+    ];
 
     // 统计所有节点
     const allNodes = [];
@@ -299,6 +363,7 @@ export async function handleProfileMode(
 
     return {
         success: true,
+        profileName: profile.name || '',
         subscriptions: allResults,
         nodes: processedNodes,
         totalCount: processedNodes.length,

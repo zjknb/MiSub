@@ -11,7 +11,7 @@ import { extractNodeMetadata } from '../modules/utils/metadata-extractor.js';
  * 节点协议正则表达式
  */
 export const NODE_PROTOCOL_REGEX =
-    /^(ss|ssr|vmess|vless|trojan|hysteria2?|hy|hy2|tuic|snell|anytls|socks5|socks|wireguard|naive\+https?|naive\+quic):\/\//i;
+    /^(ss|ssr|vmess|vless|trojan|hysteria2?|hy|hy2|tuic|snell|anytls|socks5|socks|wireguard|naive\+https?|naive\+quic|mierus):\/\//i;
 
 /**
  * 判断代理是否指向本机/未指定地址。
@@ -166,7 +166,7 @@ export function addFlagEmoji(link) {
 
         // 更全面的 Emoji 检测正则 (涵盖国旗、地区符号等)
         const HAS_EMOJI_REGEX =
-            /[\u{1F1E6}-\u{1F1FF}]{2}|\u{1F3F4}[\u{E0061}-\u{E007A}]{2,}\u{E007F}/u;
+            /[\u{1F1E6}-\u{1F1FF}]{2}|\u{1F3F4}[\u{E0061}-\u{E007A}]{2,}\u{E007F}|[\u{1F30D}-\u{1F30F}]/u;
         if (HAS_EMOJI_REGEX.test(name)) return name;
 
         const metadata = extractNodeMetadata(name);

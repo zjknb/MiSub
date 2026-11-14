@@ -68,8 +68,10 @@ export const useDataStore = defineStore('data', () => {
         }
     }
 
+    let fetchDataPromise = null;
+
     async function fetchData(forceRefresh = false) {
-        if (isLoading.value) return false;
+        if (fetchDataPromise) return fetchDataPromise;
 
         // Effective Cache Check
         if (hasDataLoaded.value && !forceRefresh) return true;
@@ -82,28 +84,32 @@ export const useDataStore = defineStore('data', () => {
             }
         }
 
-        isLoading.value = true;
-        try {
-            const data = await api.get('/api/data');
+        fetchDataPromise = (async () => {
+            isLoading.value = true;
+            try {
+                const data = await api.get('/api/data');
 
-            if (data.error) {
-                throw new Error(data.error);
+                if (data.error) {
+                    throw new Error(data.error);
+                }
+
+                hydrateFromData(data); // Re-use hydration logic
+                pruneInvalidReferences(); // 数据拉取后执行自愈
+                clearDirty();
+                return true;
+            } catch (error) {
+                console.error('Failed to fetch data:', error);
+                showToast(t('store.fetchDataFailed', { message: error.message }), 'error');
+                // 不向调用方抛出：所有调用点都没有 try/catch，rejection 会冒泡成
+                // 全局 unhandledrejection，被 main.js 处理器再提示一次，
+                // 用户会看到两个「操作失败」弹窗。
+                return false;
+            } finally {
+                isLoading.value = false;
+                fetchDataPromise = null;
             }
-
-            hydrateFromData(data); // Re-use hydration logic
-            pruneInvalidReferences(); // 数据拉取后执行自愈
-            clearDirty();
-            return true;
-        } catch (error) {
-            console.error('Failed to fetch data:', error);
-            showToast(t('store.fetchDataFailed', { message: error.message }), 'error');
-            // 不向调用方抛出：所有调用点都没有 try/catch，rejection 会冒泡成
-            // 全局 unhandledrejection，被 main.js 处理器再提示一次，
-            // 用户会看到两个「操作失败」弹窗。
-            return false;
-        } finally {
-            isLoading.value = false;
-        }
+        })();
+        return fetchDataPromise;
     }
 
     async function saveData() {
@@ -323,7 +329,28 @@ export const useDataStore = defineStore('data', () => {
     function removeProfile(id) {
         const index = profiles.value.findIndex((p) => p.id === id || p.customId === id);
         if (index !== -1) {
-            profiles.value.splice(index, 1);
+            const removed = profiles.value.splice(index, 1)[0];
+            removeProfileFromProfiles([removed.id, removed.customId].filter(Boolean));
+        }
+    }
+
+    function removeProfileFromProfiles(profileIds) {
+        const idsToRemove = Array.isArray(profileIds) ? new Set(profileIds) : new Set([profileIds]);
+        if (idsToRemove.size === 0) return;
+
+        let modified = false;
+        profiles.value.forEach((profile) => {
+            if (Array.isArray(profile.subProfiles) && profile.subProfiles.length > 0) {
+                const originalLength = profile.subProfiles.length;
+                profile.subProfiles = profile.subProfiles.filter((id) => !idsToRemove.has(id));
+                if (profile.subProfiles.length !== originalLength) {
+                    modified = true;
+                }
+            }
+        });
+
+        if (modified) {
+            profiles.value = [...profiles.value];
         }
     }
 
@@ -472,6 +499,7 @@ export const useDataStore = defineStore('data', () => {
         addProfile,
         overwriteProfiles,
         removeProfile,
+        removeProfileFromProfiles,
         removeManualNodeFromProfiles,
         removeSubscriptionFromProfiles,
         markDirty,

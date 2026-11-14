@@ -12,12 +12,13 @@ import { convertClashProxyToUrl } from '../../utils/clash-to-url.js';
 import { extractSingboxNodes } from './singbox-to-url.js';
 import { validateSS2022Node, fixSS2022Node } from './ss2022-validator.js';
 import { extractNodeMetadata } from './metadata-extractor.js';
+import { parseV2rayNLink } from './v2rayn-parser.js';
 
 /**
  * 支持的节点协议正则表达式
  */
 export const NODE_PROTOCOL_REGEX =
-    /^(ss|ssr|vmess|vless|trojan|hysteria2|hy2|hysteria|tuic|snell|naive\+https?|naive\+quic|socks5|socks|http|anytls|wireguard):\/\//i;
+    /^(ss|ssr|vmess|vless|trojan|hysteria2|hy2|hysteria|tuic|snell|naive\+https?|naive\+quic|socks5|socks|http|anytls|wireguard|mierus):\/\//i;
 
 /**
  * 尝试解析 Surge 或 Quantumult X 格式的节点字符串
@@ -168,6 +169,10 @@ function parseSurgeOrQxLine(line) {
                         proxy['reality-opts'] = proxy['reality-opts'] || {};
                         proxy['reality-opts']['short-id'] = v;
                     }
+                    if (k === 'reality-support-x25519mlkem768' || k === 'support-x25519mlkem768') {
+                        proxy['reality-opts'] = proxy['reality-opts'] || {};
+                        proxy['reality-opts']['support-x25519mlkem768'] = v === 'true' || v === '1';
+                    }
                     if (k === 'version') proxy.version = parseInt(v);
                     if (k === 'reuse' && v === 'true') proxy.reuse = true;
                     if (k === 'tfo' && v === 'true') proxy.tfo = true;
@@ -256,6 +261,13 @@ export function extractValidNodes(text) {
         .map((line) => line.trim());
 
     for (const line of lines) {
+        // v2rayN 私有分享格式：v2rayn://<protocol>/<base64url(JSON)>
+        if (/^v2rayn:\/\//i.test(line)) {
+            const converted = parseV2rayNLink(line);
+            if (converted) nodes.push(converted);
+            continue;
+        }
+
         if (NODE_PROTOCOL_REGEX.test(line)) {
             nodes.push(line);
             continue;
